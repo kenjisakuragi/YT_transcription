@@ -223,7 +223,10 @@ class YouTubeTranscriptFetcher:
         """
         try:
             # list_transcripts allows us to check for manual vs generated
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            if hasattr(self, 'cookies') and self.cookies:
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=self.cookies)
+            else:
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             
             # 1. Try to find preferred languages (manual or generated)
             try:
@@ -304,6 +307,7 @@ def main():
     parser.add_argument('--max-videos', type=int, default=10, help="Maximum number of videos to fetch")
     parser.add_argument('--lang', type=str, default="ja,en", help="Comma-separated list of languages to prioritize")
     parser.add_argument('--api-key', type=str, required=False, help="YouTube Data API Key")
+    parser.add_argument('--cookies', type=str, required=False, help="Path to cookies.txt file for authenticated requests")
 
     args = parser.parse_args()
     
@@ -316,7 +320,13 @@ def main():
     langs = [l.strip() for l in args.lang.split(',')]
 
     fetcher = YouTubeTranscriptFetcher(api_key=api_key, languages=langs)
-    fetcher.run(args.url, args.max_videos)
+    # Inject cookies if provided
+    if args.cookies:
+        fetcher.cookies = args.cookies
+    else:
+        fetcher.cookies = None
+        
+    fetcher.run(args.url, args.max_videos, output_file="transcripts.csv")
 
 if __name__ == "__main__":
     main()
