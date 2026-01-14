@@ -289,7 +289,8 @@ class YouTubeTranscriptFetcher:
             
             # Parse VTT
             vtt = webvtt.read(target_file)
-            full_text = " ".join([caption.text.strip().replace('\n', ' ') for caption in vtt])
+            # Clean text: replace newlines/tabs with space, collapse multiple spaces
+            full_text = " ".join([re.sub(r'\s+', ' ', caption.text).strip() for caption in vtt])
             
             # Cleanup specific file
             try:
@@ -355,7 +356,10 @@ class YouTubeTranscriptFetcher:
                 df[col] = None
         
         df = df[columns]
-        df.to_csv(output_file, index=False, encoding='utf-8-sig')
+        
+        # Use QUOTE_ALL to ensure commas/newlines in content don't break CSV layout
+        import csv
+        df.to_csv(output_file, index=False, encoding='utf-8-sig', quoting=csv.QUOTE_ALL)
         logger.info(f"Saved results to {output_file} (Records: {len(results)})")
 
 
