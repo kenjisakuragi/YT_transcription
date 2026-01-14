@@ -20,6 +20,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Debug: Check installed version
+try:
+    import youtube_transcript_api
+    logger.info(f"youtube-transcript-api version: {youtube_transcript_api.__version__}")
+    logger.info(f"YouTubeTranscriptApi attributes: {dir(YouTubeTranscriptApi)}")
+except Exception as e:
+    logger.error(f"Debug import failed: {e}")
+
 class YouTubeTranscriptFetcher:
     """
     A class to fetch YouTube video metadata using YouTube Data API and transcripts using youtube-transcript-api.
