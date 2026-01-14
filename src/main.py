@@ -2,11 +2,15 @@ import argparse
 import time
 import random
 import logging
+import os
+import re
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, parse_qs
 
 import pandas as pd
 from tqdm import tqdm
-import yt_dlp
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 # Configure logging
@@ -18,120 +22,201 @@ logger = logging.getLogger(__name__)
 
 class YouTubeTranscriptFetcher:
     """
-    A class to fetch YouTube video metadata and transcripts.
+    A class to fetch YouTube video metadata using YouTube Data API and transcripts using youtube-transcript-api.
     """
 
-    def __init__(self, languages: List[str] = None):
+    def __init__(self, api_key: str, languages: List[str] = None):
         """
         Initialize the fetcher.
 
         Args:
+            api_key (str): YouTube Data API Key.
             languages (List[str]): List of language codes to prioritize (e.g., ['ja', 'en']).
         """
         self.languages = languages if languages else ['ja', 'en']
+        self.youtube = build('youtube', 'v3', developerKey=api_key)
 
-    def get_video_ids(self, url: str, max_videos: int = 10) -> List[Dict[str, Any]]:
+    def _extract_id_from_url(self, url: str) -> Dict[str, str]:
         """
-        Extract video IDs and metadata from a given URL using yt-dlp.
-
-        Args:
-            url (str): The target YouTube URL (video, playlist, channel, search).
-            max_videos (int): Maximum number of videos to retrieve.
-
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries containing video metadata.
+        Parse URL to determine type (video, playlist, channel) and ID.
         """
-        ydl_opts = {
-            'extract_flat': True,  # Do not download video files
-            'quiet': True,
-            'ignoreerrors': True,  # Skip errors
-            'playlistend': max_videos, # Limit playlist/search results
-        }
-
-        # For search URLs, we might need specific handling if playlistend doesn't apply perfectly,
-        # but usually yt-dlp handles "search query" URLs as playlists.
-        # If the URL is literally a search query string provided to yt-dlp, it handles it.
-        # But if it is a URL like "https://www.youtube.com/results?search_query=foo", yt-dlp also handles it.
-
-        logger.info(f"Extracting video IDs from: {url}")
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
         
+        # Video ID
+        if 'v' in query:
+            return {'type': 'video', 'id': query['v'][0]}
+        if 'youtu.be' in parsed.netloc:
+            return {'type': 'video', 'id': parsed.path.lstrip('/')}
+        
+        # Playlist ID
+        if 'list' in query:
+            return {'type': 'playlist', 'id': query['list'][0]}
+        
+        # Channel ID (handle legacy user/ and new channel/ and @handle)
+        path_parts = parsed.path.strip('/').split('/')
+        if len(path_parts) >= 2 and path_parts[0] == 'channel':
+            return {'type': 'channel', 'id': path_parts[1]}
+        
+        # Handle custom URL or handle (requiers search or resolving)
+        if len(path_parts) >= 1 and (path_parts[0].startswith('@') or path_parts[0] == 'c' or path_parts[0] == 'user'):
+            # For brevity, treating as 'handle' or custom which necessitates search
+            return {'type': 'handle', 'id': path_parts[-1]}  
+
+        # Return None or treat as search query if simple string? 
+        # For now assume it's a search keyword if not a URL structure
+        if not parsed.netloc:
+             return {'type': 'search', 'id': url} # treat the whole string as search query
+
+        return {'type': 'unknown', 'id': url}
+
+    def get_video_ids(self, url_or_query: str, max_videos: int = 10) -> List[Dict[str, Any]]:
+        """
+        Retrieve video metadata using YouTube Data API.
+        """
+        target = self._extract_id_from_url(url_or_query)
         videos = []
+        
+        logger.info(f"Target identified: {target}")
+
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
+            if target['type'] == 'video':
+                videos = self._get_video_details([target['id']])
+            
+            elif target['type'] == 'playlist':
+                videos = self._get_playlist_items(target['id'], max_videos)
+            
+            elif target['type'] == 'channel':
+                # First get uploads playlist ID of the channel
+                uploads_playlist_id = self._get_channel_uploads_id(target['id'])
+                if uploads_playlist_id:
+                     videos = self._get_playlist_items(uploads_playlist_id, max_videos)
+            
+            elif target['type'] == 'handle':
+                 # Search for channel by handle/custom url to get ID
+                 channel_id = self._search_channel_id(target['id'])
+                 if channel_id:
+                     uploads_playlist_id = self._get_channel_uploads_id(channel_id)
+                     if uploads_playlist_id:
+                         videos = self._get_playlist_items(uploads_playlist_id, max_videos)
+            
+            elif target['type'] == 'search':
+                 videos = self._search_videos(target['id'], max_videos)
 
-                if info is None:
-                    logger.warning("No information extracted.")
-                    return []
+            else:
+                 # Fallback: treat as search query
+                 videos = self._search_videos(url_or_query, max_videos)
 
-                # If it's a single video, 'entries' might not exist or be None
-                if 'entries' not in info:
-                    # Single video
-                    videos.append({
-                        'video_id': info.get('id'),
-                        'title': info.get('title'),
-                        'url': info.get('webpage_url') or info.get('url'),
-                        'publish_date': info.get('upload_date'), # Format might need adjustment (YYYYMMDD usually)
-                        'duration': info.get('duration')
-                    })
-                else:
-                    # Playlist, Channel, or Search Results
-                    entries = info['entries']
-                    # entries is a generator or list. 
-                    # extract_flat=True usually returns dicts in entries.
-                    
-                    count = 0
-                    for entry in entries:
-                        if entry is None:
-                            continue
-                        
-                        # Apply max limit logic again just in case playlistend didn't catch specific cases
-                        if count >= max_videos:
-                            break
+        except HttpError as e:
+            logger.error(f"YouTube API Error: {e}")
+            return []
 
-                        v_id = entry.get('id')
-                        # Sometimes extract_flat returns minimal info.
-                        # We might need 'url' to be constructed if missing.
-                        v_url = entry.get('url')
-                        if not v_url and v_id:
-                            v_url = f"https://www.youtube.com/watch?v={v_id}"
+        return videos[:max_videos]
 
-                        videos.append({
-                            'video_id': v_id,
-                            'title': entry.get('title'),
-                            'url': v_url,
-                            'publish_date': entry.get('upload_date'),
-                            'duration': entry.get('duration')
-                        })
-                        count += 1
-                        
-        except Exception as e:
-            logger.error(f"Error extracting video IDs: {e}")
+    def _get_video_details(self, video_ids: List[str]) -> List[Dict[str, Any]]:
+        if not video_ids:
+            return []
+        
+        results = []
+        # API allows up to 50 IDs per request
+        for i in range(0, len(video_ids), 50):
+            chunk = video_ids[i:i+50]
+            request = self.youtube.videos().list(
+                part="snippet,contentDetails",
+                id=','.join(chunk)
+            )
+            response = request.execute()
+            
+            for item in response.get('items', []):
+                results.append({
+                    'video_id': item['id'],
+                    'title': item['snippet']['title'],
+                    'url': f"https://www.youtube.com/watch?v={item['id']}",
+                    'publish_date': item['snippet']['publishedAt'],
+                    'duration': item['contentDetails']['duration'] # ISO 8601 format
+                })
+        return results
 
-        logger.info(f"Found {len(videos)} videos.")
-        return videos
+    def _get_playlist_items(self, playlist_id: str, max_results: int) -> List[Dict[str, Any]]:
+        video_ids = []
+        next_page_token = None
+        
+        while len(video_ids) < max_results:
+            request = self.youtube.playlistItems().list(
+                part="contentDetails",
+                playlistId=playlist_id,
+                maxResults=min(50, max_results - len(video_ids)),
+                pageToken=next_page_token
+            )
+            response = request.execute()
+            
+            for item in response.get('items', []):
+                video_ids.append(item['contentDetails']['videoId'])
+            
+            next_page_token = response.get('nextPageToken')
+            if not next_page_token:
+                break
+                
+        return self._get_video_details(video_ids)
+
+    def _get_channel_uploads_id(self, channel_id: str) -> Optional[str]:
+        request = self.youtube.channels().list(
+            part="contentDetails",
+            id=channel_id
+        )
+        response = request.execute()
+        items = response.get('items', [])
+        if items:
+            return items[0]['contentDetails']['relatedPlaylists']['uploads']
+        return None
+    
+    def _search_channel_id(self, query: str) -> Optional[str]:
+         # Rough search for a channel ID by query (handle)
+         # Note: Searching by handle isn't directly supported in 'channels' list until resolved, 
+         # but 'search' resource can find it.
+         request = self.youtube.search().list(
+             part="snippet",
+             q=query,
+             type="channel",
+             maxResults=1
+         )
+         response = request.execute()
+         items = response.get('items', [])
+         if items:
+             return items[0]['snippet']['channelId']
+         return None
+
+    def _search_videos(self, query: str, max_results: int) -> List[Dict[str, Any]]:
+        video_ids = []
+        next_page_token = None
+        
+        while len(video_ids) < max_results:
+            request = self.youtube.search().list(
+                part="id",
+                q=query,
+                type="video",
+                maxResults=min(50, max_results - len(video_ids)),
+                pageToken=next_page_token
+            )
+            response = request.execute()
+            
+            for item in response.get('items', []):
+                video_ids.append(item['id']['videoId'])
+                
+            next_page_token = response.get('nextPageToken')
+            if not next_page_token:
+                break
+        
+        return self._get_video_details(video_ids)
 
     def fetch_transcript_content(self, video_id: str) -> Dict[str, Any]:
         """
         Fetch transcript for a specific video ID.
-
-        Args:
-            video_id (str): YouTube Video ID.
-
-        Returns:
-            Dict[str, Any]: Dictionary with transcript details or None if failed.
         """
         try:
-            # list_transcripts allows us to check for manual vs generated
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            
-            # Find transcript matching languages
             transcript = transcript_list.find_transcript(self.languages)
-            
-            # Fetch the actual data
             transcript_data = transcript.fetch()
-            
-            # Merge text
             full_text = " ".join([item['text'] for item in transcript_data])
             
             return {
@@ -139,9 +224,8 @@ class YouTubeTranscriptFetcher:
                 'language': transcript.language_code,
                 'is_generated': transcript.is_generated
             }
-
-        except (TranscriptsDisabled, NoTranscriptFound):
-            logger.warning(f"No suitable transcript found for {video_id}.")
+        except (TranscriptsDisabled, NoTranscriptFound) as e:
+            logger.warning(f"No suitable transcript for {video_id}: {e}")
             return None
         except Exception as e:
             logger.error(f"Error fetching transcript for {video_id}: {e}")
@@ -153,48 +237,44 @@ class YouTubeTranscriptFetcher:
         """
         videos = self.get_video_ids(url, max_videos)
         if not videos:
-            logger.info("No videos to process.")
+            logger.warning("No videos found. Generating empty CSV.")
+            df = pd.DataFrame(columns=['video_id', 'title', 'url', 'publish_date', 'duration', 'transcript', 'language', 'is_generated'])
+            df.to_csv(output_file, index=False, encoding='utf-8-sig')
             return
 
         print(f"Starting transcript fetch for {len(videos)} videos...")
         
         results = []
         
-        # Using tqdm for progress bar
         for video_meta in tqdm(videos, desc="Processing videos"):
             video_id = video_meta.get('video_id')
-            if not video_id:
-                continue
-
-            # Sleep to avoid rate limiting
-            sleep_time = random.uniform(2, 5)
-            time.sleep(sleep_time)
+            
+            # Rate limit politeness
+            time.sleep(random.uniform(1, 3))
 
             transcript_info = self.fetch_transcript_content(video_id)
 
             if transcript_info:
-                # Merge metadata with transcript info
                 record = {**video_meta, **transcript_info}
                 results.append(record)
             else:
-                # We can optionally record failed videos or just skip.
-                # Requirement says: "Error log ... skip and continue".
                 pass
 
+        # Always generate CSV
         if results:
             df = pd.DataFrame(results)
-            # Ensure columns order as requested
-            columns = ['video_id', 'title', 'url', 'publish_date', 'duration', 'transcript', 'language', 'is_generated']
-            # Add missing columns if any (e.g. if metadata was incomplete, fill na)
-            for col in columns:
-                if col not in df.columns:
-                    df[col] = None
-            
-            df = df[columns]
-            df.to_csv(output_file, index=False, encoding='utf-8-sig')
-            logger.info(f"Successfully saved {len(results)} transcripts to {output_file}")
         else:
-            logger.info("No transcripts were fetched.")
+            logger.warning("No transcripts were fetched. Generating empty CSV.")
+            df = pd.DataFrame(columns=['video_id', 'title', 'url', 'publish_date', 'duration', 'transcript', 'language', 'is_generated'])
+
+        columns = ['video_id', 'title', 'url', 'publish_date', 'duration', 'transcript', 'language', 'is_generated']
+        for col in columns:
+            if col not in df.columns:
+                df[col] = None
+        
+        df = df[columns]
+        df.to_csv(output_file, index=False, encoding='utf-8-sig')
+        logger.info(f"Saved results to {output_file} (Records: {len(results)})")
 
 
 def main():
@@ -202,12 +282,19 @@ def main():
     parser.add_argument('--url', required=True, help="Target YouTube URL (video, playlist, channel, search)")
     parser.add_argument('--max-videos', type=int, default=10, help="Maximum number of videos to fetch")
     parser.add_argument('--lang', type=str, default="ja,en", help="Comma-separated list of languages to prioritize")
+    parser.add_argument('--api-key', type=str, required=False, help="YouTube Data API Key")
 
     args = parser.parse_args()
+    
+    # Prioritize argument, fall back to environment variable
+    api_key = args.api_key or os.environ.get("YOUTUBE_API_KEY")
+    
+    if not api_key:
+        raise ValueError("YouTube API Key is required. Set YOUTUBE_API_KEY env var or pass --api-key.")
 
     langs = [l.strip() for l in args.lang.split(',')]
 
-    fetcher = YouTubeTranscriptFetcher(languages=langs)
+    fetcher = YouTubeTranscriptFetcher(api_key=api_key, languages=langs)
     fetcher.run(args.url, args.max_videos)
 
 if __name__ == "__main__":
