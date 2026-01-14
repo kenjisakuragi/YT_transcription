@@ -244,13 +244,17 @@ class YouTubeTranscriptFetcher:
         }
 
         # Apply cookies if available
-        if self.cookies:
+        if getattr(self, 'cookies', None):
              if os.path.exists(self.cookies):
                  size = os.path.getsize(self.cookies)
                  logger.info(f"Using cookie file: {self.cookies} (Size: {size} bytes)")
                  ydl_opts['cookiefile'] = self.cookies
              else:
                  logger.warning(f"Cookie file path provided but not found: {self.cookies}")
+        elif getattr(self, 'browser', None):
+             logger.info(f"Using cookies from local browser: {self.browser}")
+             # format: (browser, profile, keyring, container)
+             ydl_opts['cookiesfrombrowser'] = [(self.browser, None, None, None)]
         else:
              logger.info("No cookies configured.")
 
@@ -374,18 +378,28 @@ def main():
     parser.add_argument('--lang', type=str, default="ja,en", help="Comma-separated list of languages to prioritize")
     parser.add_argument('--api-key', type=str, required=False, help="YouTube Data API Key")
     parser.add_argument('--cookies', type=str, required=False, help="Path to cookies.txt file for authenticated requests")
+    parser.add_argument('--browser', type=str, required=False, help="Load cookies from local browser (e.g. 'chrome', 'edge'). No file needed.")
 
     args = parser.parse_args()
     
     # Prioritize argument, fall back to environment variable
     api_key = args.api_key or os.environ.get("YOUTUBE_API_KEY")
     
+    # If using browser auth, API Key might functionally not be needed for TRANSCRIPT but IS needed for METADATA fetching via YouTube Data API.
+    # So we still need API Key.
     if not api_key:
         raise ValueError("YouTube API Key is required. Set YOUTUBE_API_KEY env var or pass --api-key.")
 
     langs = [l.strip() for l in args.lang.split(',')]
 
     fetcher = YouTubeTranscriptFetcher(api_key=api_key, languages=langs)
+    
+    # Store browser choice
+    if args.browser:
+        fetcher.browser = args.browser
+    else:
+        fetcher.browser = None
+
     # Inject cookies if provided via arg or environment variable
     cookies_path = args.cookies
     
