@@ -1,5 +1,5 @@
 yt-dlp
-youtube-transcript-api>=0.6.2
+youtube-transcript-api==0.6.2
 google-api-python-client
 pandas
 tqdm
