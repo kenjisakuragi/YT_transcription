@@ -222,8 +222,21 @@ class YouTubeTranscriptFetcher:
         Fetch transcript for a specific video ID.
         """
         try:
+            # list_transcripts allows us to check for manual vs generated
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            transcript = transcript_list.find_transcript(self.languages)
+            
+            # 1. Try to find preferred languages (manual or generated)
+            try:
+                transcript = transcript_list.find_transcript(self.languages)
+            except NoTranscriptFound:
+                # 2. Fallback: try ANY generated transcript (usually 'en' auto-generated)
+                # or just take the first available one from the list
+                possible_transcripts = list(transcript_list)
+                if possible_transcripts:
+                    transcript = possible_transcripts[0]
+                    logger.info(f"Preferred languages {self.languages} not found. Falling back to {transcript.language_code}.")
+                else:
+                    raise NoTranscriptFound(video_id)
             transcript_data = transcript.fetch()
             full_text = " ".join([item['text'] for item in transcript_data])
             
