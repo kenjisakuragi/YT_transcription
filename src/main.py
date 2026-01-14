@@ -245,10 +245,14 @@ class YouTubeTranscriptFetcher:
 
         # Apply cookies if available
         if self.cookies:
-             ydl_opts['cookiefile'] = self.cookies
+             if os.path.exists(self.cookies):
+                 size = os.path.getsize(self.cookies)
+                 logger.info(f"Using cookie file: {self.cookies} (Size: {size} bytes)")
+                 ydl_opts['cookiefile'] = self.cookies
+             else:
+                 logger.warning(f"Cookie file path provided but not found: {self.cookies}")
         else:
-             # If no cookies, yt-dlp might fail for bot protection, but let's try.
-             pass
+             logger.info("No cookies configured.")
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
