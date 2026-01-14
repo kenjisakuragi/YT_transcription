@@ -320,13 +320,38 @@ def main():
     langs = [l.strip() for l in args.lang.split(',')]
 
     fetcher = YouTubeTranscriptFetcher(api_key=api_key, languages=langs)
-    # Inject cookies if provided
-    if args.cookies:
-        fetcher.cookies = args.cookies
+    # Inject cookies if provided via arg or environment variable
+    cookies_path = args.cookies
+    
+    # If no file path provided, check for content in env var (GitHub Secrets friendly)
+    if not cookies_path and os.environ.get("YOUTUBE_COOKIES"):
+        import tempfile
+        logger.info("Found YOUTUBE_COOKIES in environment variables. Creating temporary cookies file.")
+        
+        # Create a temp file for cookies. 
+        # Note: Delete=False so we can read it, but ideally we should clean it up. 
+        # For this script run, letting OS clean up /tmp or just leaving it is acceptable for now.
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt', encoding='utf-8') as tf:
+                tf.write(os.environ.get("YOUTUBE_COOKIES"))
+                cookies_path = tf.name
+        except Exception as e:
+            logger.error(f"Failed to create temp cookies file: {e}")
+
+    if cookies_path:
+        fetcher.cookies = cookies_path
     else:
         fetcher.cookies = None
         
-    fetcher.run(args.url, args.max_videos, output_file="transcripts.csv")
+    try:
+        fetcher.run(args.url, args.max_videos, output_file="transcripts.csv")
+    finally:
+        # Cleanup temp file if it was created from env var
+        if not args.cookies and cookies_path and os.path.exists(cookies_path):
+            try:
+                os.remove(cookies_path)
+            except:
+                pass
 
 if __name__ == "__main__":
     main()

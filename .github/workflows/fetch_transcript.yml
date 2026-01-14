@@ -39,6 +39,7 @@ jobs:
       - name: Run Transcript Fetcher
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          YOUTUBE_COOKIES: ${{ secrets.YOUTUBE_COOKIES }}
         run: |
           python src/main.py \
             --url "${{ inputs.target_url }}" \
