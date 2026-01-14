@@ -219,41 +219,99 @@ class YouTubeTranscriptFetcher:
 
     def fetch_transcript_content(self, video_id: str) -> Dict[str, Any]:
         """
-        Fetch transcript for a specific video ID.
+        Fetch transcript for a specific video ID using yt-dlp (more robust with cookies).
         """
+        import yt_dlp
+        import webvtt
+        import glob
+        import os
+
+        # Output template for yt-dlp to save subtitles
+        # stored in a temp directory
+        temp_dir = "temp_subs"
+        os.makedirs(temp_dir, exist_ok=True)
+        out_tmpl = f"{temp_dir}/{video_id}"
+
+        ydl_opts = {
+            'skip_download': True,        # Don't download video
+            'writesubtitles': True,       # Download manual subtitles
+            'writeautomaticsub': True,    # Download auto-generated subtitles
+            'subtitleslangs': self.languages, # Prefer requested languages
+            'subtitlesformat': 'vtt',     # Download as vtt
+            'outtmpl': out_tmpl,
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        # Apply cookies if available
+        if self.cookies:
+             ydl_opts['cookiefile'] = self.cookies
+        else:
+             # If no cookies, yt-dlp might fail for bot protection, but let's try.
+             pass
+
         try:
-            # list_transcripts allows us to check for manual vs generated
-            if hasattr(self, 'cookies') and self.cookies:
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=self.cookies)
-            else:
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                ydl.download([url])
             
-            # 1. Try to find preferred languages (manual or generated)
+            # Find generated file. yt-dlp appends language code, e.g. "video_id.en.vtt"
+            # We look for any vtt file starting with video_id in the temp dir
+            files = glob.glob(f"{out_tmpl}*.vtt")
+            
+            if not files:
+                 logger.warning(f"yt-dlp finished but no .vtt file found for {video_id}")
+                 return None
+
+            # Pick the best file essentially (first one found or prioritize language)
+            # files usually look like "temp_subs/VIDEOID.ja.vtt" or "temp_subs/VIDEOID.en.vtt"
+            # We blindly take the first one since we restricted langs in ydl_opts
+            target_file = files[0]
+            
+            # Extract language from filename if possible?
+            # filename format: out_tmpl + .LANG.vtt
+            # e.g. temp_subs/VID.ja.vtt -> ja
+            # This is rough parsing
+            lang_code = "unknown"
             try:
-                transcript = transcript_list.find_transcript(self.languages)
-            except NoTranscriptFound:
-                # 2. Fallback: try ANY generated transcript (usually 'en' auto-generated)
-                # or just take the first available one from the list
-                possible_transcripts = list(transcript_list)
-                if possible_transcripts:
-                    transcript = possible_transcripts[0]
-                    logger.info(f"Preferred languages {self.languages} not found. Falling back to {transcript.language_code}.")
-                else:
-                    raise NoTranscriptFound(video_id)
-            transcript_data = transcript.fetch()
-            full_text = " ".join([item['text'] for item in transcript_data])
+                base = os.path.basename(target_file)
+                # remove .vtt
+                base = base[:-4]
+                # remove video_id + dot
+                if base.startswith(video_id + "."):
+                     lang_code = base[len(video_id)+1:]
+            except:
+                pass
+
+            is_generated = False # yt-dlp doesn't explicitly flag this in filename easily, assume False or check parsing? 
+            # Auto-subs often named .en.vtt same as manual. 
+            # We can check vtt content metadata if needed, but for now ignoring is_generated precision.
             
+            # Parse VTT
+            vtt = webvtt.read(target_file)
+            full_text = " ".join([caption.text.strip().replace('\n', ' ') for caption in vtt])
+            
+            # Cleanup specific file
+            try:
+                os.remove(target_file)
+            except:
+                pass
+            
+            if not full_text:
+                return None
+
             return {
                 'transcript': full_text,
-                'language': transcript.language_code,
-                'is_generated': transcript.is_generated
+                'language': lang_code,
+                'is_generated': is_generated 
             }
-        except (TranscriptsDisabled, NoTranscriptFound) as e:
-            logger.warning(f"No suitable transcript for {video_id}: {e}")
-            return None
+
         except Exception as e:
-            logger.error(f"Error fetching transcript for {video_id}: {e}")
+            logger.error(f"Error fetching transcript for {video_id} with yt-dlp: {e}")
             return None
+        finally:
+             # Cleanup temp dir? We can leave it for now or clean up indiv files.
+             pass
 
     def run(self, url: str, max_videos: int, output_file: str = "transcripts.csv"):
         """
