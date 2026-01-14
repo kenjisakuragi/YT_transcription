@@ -31,6 +31,11 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install --force-reinstall --no-cache-dir -r requirements.txt; fi
 
+      - name: Debug Environment
+        run: |
+          python verify_env.py
+          pip list
+
       - name: Run Transcript Fetcher
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
