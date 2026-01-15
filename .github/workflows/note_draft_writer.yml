@@ -1,0 +1,48 @@
+name: note_draft_writer
+
+on:
+  workflow_dispatch:
+    inputs:
+      title:
+        description: 'Article Title'
+        required: true
+      body:
+        description: 'Article Body (Markdown allowed)'
+        required: true
+        type: string
+  
+jobs:
+  create_note_draft:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install playwright
+          playwright install chromium
+          playwright install-deps chromium
+
+      - name: Create Content File
+        run: |
+          # Create a JSON file from inputs
+          echo '${{ toJson(inputs) }}' > content.json
+          # Note: We need to filter inputs to match expected format if needed
+          # But for simplicity, we assume inputs.title and inputs.body are keys
+          # The toJson above will create {"title": "...", "body": "..."} which matches our script.
+        
+      - name: Run Post Script
+        env:
+          NOTE_AUTH_JSON: ${{ secrets.NOTE_AUTH_JSON }}
+        run: |
+          if [ -z "$NOTE_AUTH_JSON" ]; then
+            echo "Error: NOTE_AUTH_JSON secret is missing."
+            exit 1
+          fi
+          python skills/note_writer/scripts/post_note.py --content content.json --headless
